@@ -1,0 +1,45 @@
+# Distances & Feature Scaling — Senior ML Engineer Interview Prep (2026)
+
+> Underpins nearly every algorithm already covered (KNN, SVM, KMeans, DBSCAN, Mean Shift) — senior interviewers use this topic to check whether you understand the *mechanism* behind "always scale your features," not just the rule of thumb.
+
+## TL;DR Refresher
+
+- Common distance metrics: **Euclidean** (`L2`, straight-line distance — sensitive to all dimensions equally, assumes isotropic space), **Manhattan** (`L1`, sum of absolute differences — more robust to outliers in individual dimensions, natural for grid-like/sparse data), **Minkowski** (generalizes both, `p`-norm), **Cosine** (angle between vectors — scale-invariant, standard for text/embedding similarity), **Mahalanobis** (accounts for feature covariance/correlation, effectively "whitens" the space before computing Euclidean distance).
+- Scaling methods: **Standardization** (`z = (x-μ)/σ`, zero mean/unit variance — assumes roughly Gaussian-ish data, doesn't bound values), **Min-Max normalization** (`[0,1]` range — sensitive to outliers since they define the range), **Robust scaling** (uses median/IQR instead of mean/std — robust to outliers).
+- Distance-based algorithms (KNN, SVM with RBF kernel, KMeans, DBSCAN, Mean Shift, PCA) are scale-*dependent*; tree-based algorithms (Decision Trees, Random Forest, gradient boosting) are scale-*invariant* (splits are based on ordering/thresholds within a feature, unaffected by monotonic rescaling) — this distinction is one of the most commonly tested pieces of judgment across the whole interview.
+
+## What's New / State of the Art (2025–2026)
+
+- **Embedding-space distance choice is now a bigger practical decision than classic tabular-feature scaling** — with most 2025–2026 systems built around learned embeddings (text, image, user/item), the live question is less "should I standardize this column" and more "does my distance metric at query time match the metric the embedding model was trained/contrastively optimized with" (usually cosine similarity for normalized embeddings) — a mismatch here silently degrades retrieval/clustering quality without throwing any error.
+- **Mahalanobis distance has seen renewed attention in anomaly-detection and drift-monitoring pipelines** — because it accounts for feature covariance, it's a more principled way to flag multivariate outliers (a point that's normal on every individual feature but anomalous in their *combination*) than univariate z-score checks, and shows up in 2025–2026 production monitoring/drift-detection stacks (see the Outliers and Evaluation Metrics docs).
+- **High-dimensional distance concentration** (the curse-of-dimensionality effect where all pairwise distances converge as dimensionality grows) continues to be a standard senior-level discussion point, now framed specifically around whether/how much it actually degrades similarity search on modern learned embeddings (which, despite high nominal dimensionality, often lie on a much lower-dimensional manifold — see Dimensionality Reduction, folder 27) rather than on random high-dimensional data.
+- **`scikit-learn`/`cuML` scaling utilities remain standard**, but the more consequential 2025–2026 practice is ensuring scaling parameters (mean/std, min/max) are **fit only on training data and applied identically at inference** via a persisted transformer (part of a feature store or serialized pipeline) — train/serve skew from inconsistent scaling remains one of the most common real-world production bugs, and is a favorite senior "debug this" interview scenario.
+
+## Senior-Level Interview Questions
+
+**Q1. Precisely explain why unscaled features distort Euclidean-distance-based algorithms, with a concrete numeric example.**
+Strong answer: Consider two features: income (range $20,000–$200,000) and age (range 20–80). Euclidean distance `√(Δincome² + Δage²)` will be almost entirely dominated by the income term purely because of its larger numeric scale, regardless of whether age is actually the more predictive/relevant feature — a $10,000 income difference contributes far more to the distance than a 10-year age difference, even if age matters more for the task. Standardizing both to comparable scales (e.g., z-scores) ensures each feature contributes to the distance in proportion to its actual variance/informativeness, not its arbitrary unit of measurement.
+
+**Q2. Why are tree-based models scale-invariant, and does this mean feature scaling is *never* useful for them?**
+Strong answer: A decision tree split asks "is `xⱼ > threshold`?" — this decision (and hence the resulting tree structure and predictions) is unchanged under any monotonic transformation of `xⱼ` (including linear scaling), since only the *ordering* of values matters, not their magnitude. However, scaling can still matter for tree-based models indirectly: regularization terms in some implementations, numerical stability of gradient/Hessian computations in gradient boosting, or when features feed into a *combined* pipeline (e.g., a tree ensemble stacked with a linear meta-learner) — so "tree models don't need scaling" is directionally correct but shouldn't be stated as an absolute without these caveats.
+
+**Q3. Standardization vs. Min-Max normalization vs. Robust scaling — walk through when each is the right choice, using a dataset with heavy outliers as the deciding example.**
+Strong answer: With heavy outliers, Min-Max normalization is the worst choice — a single extreme outlier defines the range's max (or min), compressing all other values into a tiny sub-range and destroying discriminative resolution among the non-outlier majority. Standardization is better but still outlier-sensitive (mean and standard deviation are both pulled by extreme values). Robust scaling (median and IQR) is the right choice here — it's explicitly designed to be insensitive to outliers, giving a stable, representative scale for the bulk of the data regardless of a few extreme points.
+
+**Q4. Explain Mahalanobis distance and why it can flag an anomaly that no single-feature (univariate) check would catch.**
+Strong answer: Mahalanobis distance is `√((x-μ)ᵀΣ⁻¹(x-μ))` — Euclidean distance computed in a "whitened" space where features are decorrelated and scaled by their covariance structure `Σ`. Consider height and weight, which are normally strongly positively correlated: a person with height at the 50th percentile and weight at the 99th percentile is unremarkable on either feature individually, but the *combination* (tall-average height with very high weight, or worse, short with very high weight) is unusual given their typical joint relationship — Mahalanobis distance captures this by accounting for `Σ`, while checking height and weight as two independent z-scores would miss it entirely.
+
+**Q5. You deploy a KNN-based recommendation model; offline evaluation looks great, but production recommendations are nonsensical. You discover the scaler was fit on a *different* (older) dataset snapshot than the one used for training the model. Explain the failure and how you'd prevent recurrence.**
+Strong answer: If the scaler's mean/std (or min/max) parameters were fit on stale data, incoming production features get transformed inconsistently with how the model's training features were scaled — effectively feeding the model out-of-distribution inputs even though the raw data looks normal, silently corrupting every distance computation downstream. Prevention: version and persist the fitted scaler as part of the same artifact/pipeline as the model (e.g., a single serialized `sklearn.Pipeline`, or a feature-store transformation versioned alongside the model version), enforce that training and serving always load the *same* pipeline artifact, and add a monitoring check comparing feature-scaling statistics (post-transform mean/std) between training and live serving traffic to catch this class of skew automatically.
+
+## Common Pitfalls & Follow-Up Probes
+
+- Fitting the scaler on the full dataset (train+test) before splitting — classic data leakage; scalers must be fit on training data only, then applied (not refit) to validation/test/production data.
+- Not knowing cosine similarity and Euclidean distance give identical *rankings* for L2-normalized vectors, but different rankings otherwise — a common trip-up when discussing embedding search.
+- Assuming standardization is always "safe" — for genuinely non-Gaussian, multi-modal, or heavily skewed features, other transforms (log, Box-Cox, quantile transform) may be more appropriate before or instead of simple z-scoring.
+
+## Key Resources
+
+- [Comprehensive Guide To Approximate Nearest Neighbors Algorithms](https://towardsdatascience.com/comprehensive-guide-to-approximate-nearest-neighbors-algorithms-8b94f057d6b6/) — for the embedding-distance-metric-matching discussion.
+- De Maesschalck, Jouan-Rimbaud & Massart (2000), *"The Mahalanobis distance"* — the standard reference.
+- scikit-learn preprocessing documentation (`StandardScaler`, `MinMaxScaler`, `RobustScaler`) — for exact formulas and implementation details.
